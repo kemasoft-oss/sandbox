@@ -1,0 +1,69 @@
+#!/bin/bash
+# vim: set ft=sh ff=unix expandtab ts=2 sw=2 :
+
+set -e
+_d(){ [ -n "$DEBUG" ]; }; _d && set -x  # debug
+
+# DockerでPulseaudioを使って，ホストで音を出していてもコンテナで音を出せるようにする． - Qiita
+# https://qiita.com/Light606F/items/898081a73166c010473a
+
+DEFAULT_SOUND_URL=https://vsq.co.jp/plus/wordpress/wp-content/uploads/2022/06/VSQ_JINGLE_124_worry_01.mp3
+SOUND_URL=${URL:-${1:-${DEFAULT_SOUND_URL}}}
+
+_usage(){
+  cat <<...
+Usage: $(basename "$0") [URL]
+
+Parameters:
+  URL   url for sound file
+        (default: $DEFAULT_SOUND_URL)
+
+...
+}
+
+case "$1" in
+  -h | --help)
+    _usage; exit 0;;
+esac
+
+# create unix socket
+socket_path="/tmp/pulseaudio.$(id -u).socket"
+if ! [ -S "$socket_path" ]; then
+  if [ -e "$socket_path" ]; then
+    rm -vrf "$socket_path" || :
+  fi
+  pacmd load-module module-native-protocol-unix socket="$socket_path"
+fi
+
+# create client.conf
+conf_path="/tmp/pulseaudio.$(id -u).client.conf"
+tee "$conf_path" <<...
+default-server = unix:$socket_path
+# Prevent a server running in the container
+autospawn = no
+daemon-binary = /bin/true
+# Prevent the use of shared memory
+enable-shm = false
+...
+
+# build container
+contaier_image=my-pulse
+if ! docker images | grep -q "$contaier_image"; then
+  docker build -t "$contaier_image" - <<'...'
+FROM ubuntu:22.04
+ENV TZ Asia/Tokyo
+ENV DEBIAN_FRONTEND noninteractive
+ENV APT_OPTIONS='--assume-yes --option=Dpkg::Options::=--force-confold --option=Dpkg::options::=--force-unsafe-io'
+RUN apt-get update && apt-get install $APT_OPTIONS pulseaudio mpv
+...
+fi
+
+# playback sound (run container)
+docker run --rm \
+    --env PULSE_SERVER="unix:$socket_path" \
+    --env PULSE_COOKIE=/tmp/pulseaudio.cookie \
+    --volume "$socket_path:$socket_path" \
+    --volume "$conf_path:$conf_path" \
+    --user "$(id -u):$(id -g)" \
+    "$contaier_image" mpv "$SOUND_URL"
+
